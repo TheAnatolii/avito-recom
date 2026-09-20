@@ -1,29 +1,11 @@
 """BM25 ретривер."""
-import os, sys, time
-import numpy as np, scipy.sparse as sp
-sys.path.insert(0, os.path.dirname(__file__))
-from common import load_cached, save_cached, log, norm_text
-from valid import recall_at_k
-
-SEED = 42
-FIELD_WEIGHTS = {'title': 3.0, 'desc': 1.0, 'params': 2.0}
-BM25_K = 1.2
-BM25_B = 0.75
-
-
-class Lemmatizer:
-    def __init__(self):
-        import pymorphy3
-        self._morph = pymorphy3.MorphAnalyzer()
-        self._cache = {}
-
-    def doc_tokens(self, text):
-        return [self._lemmatize(t) for t in norm_text(text).split() if len(t) > 1]
-
-    def _lemmatize(self, word):
-        if word not in self._cache:
-            self._cache[word] = self._morph.parse(word)[0].normal_form
-        return self._cache[word]
+import time
+import numpy as np
+import scipy.sparse as sp
+from src.utils.logging import log
+from src.utils.cache import load_cached, save_cached
+from src.utils.text import norm_text, Lemmatizer
+from src.config import BM25_K, BM25_B, FIELD_WEIGHTS
 
 
 class BM25Index:
@@ -104,6 +86,10 @@ class BM25Retriever:
         save_cached({'indexes': self.indexes, 'ids': self.ids, 'corpus': self.corpus}, 'bm25_index.pkl')
 
     def retrieve(self, query_text, topn=150, weights=None):
+        return [iid for iid, _ in self.retrieve_with_scores(query_text, topn=topn, weights=weights)]
+
+    def retrieve_with_scores(self, query_text, topn=150, weights=None):
+        """Возвращает [(item_id, score), ...] отсортированные по убыванию скор."""
         qt = self.lem.doc_tokens(query_text)
         if not qt:
             return []
@@ -119,28 +105,4 @@ class BM25Retriever:
         if combined is None:
             return []
         order = np.argsort(combined)[::-1][:topn]
-        return [self.ids[i] for i in order]
-
-
-def evaluate(sample=500, topn=150, seed=SEED):
-    t0 = time.time()
-    _, val_queries, corpus, _ = load_cached('split_v1.pkl')
-    if sample and sample < len(val_queries):
-        rng = np.random.default_rng(seed)
-        vq = val_queries.iloc[rng.choice(len(val_queries), size=sample, replace=False)].copy()
-        log(f'Подвыборка val: {len(vq)}')
-    else:
-        vq = val_queries
-    log('Построение BM25...')
-    retriever = BM25Retriever(corpus, Lemmatizer())
-    log(f'Индексы готовы, {time.time() - t0:.1f}s')
-    log(f'Ретривал для {len(vq)} запросов...')
-    ranked = {row['search_query']: retriever.retrieve(row['search_query'], topn=topn) for _, row in vq.iterrows()}
-    log(f'Ретривал завершён, {time.time() - t0:.1f}s')
-    for k in (10, 50, topn):
-        r, rn = recall_at_k(ranked, vq, k)
-        log(f'  bm25 recall@{k}: overall={r:.4f}, new-item={rn:.4f}')
-
-
-if __name__ == '__main__':
-    evaluate()
+        return [(self.ids[i], float(combined[i])) for i in order]
